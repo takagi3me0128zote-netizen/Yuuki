@@ -1,0 +1,154 @@
+import cv2
+import pygame
+import mediapipe as mp
+import numpy as np
+from pygame.locals import *
+from OpenGL.GL import *
+from OpenGL.GLU import *
+
+# ===== 設定 =====
+CAMERA_ID = 0        # カメラが映らない場合は 1 や 2 に変えてください
+WINDOW_W  = 900
+WINDOW_H  = 600
+CAM_W     = 400
+CAM_H     = 300
+
+# 骨格の接続定義（MediaPipe 33点）
+CONNECTIONS = [
+    (11,12),(11,13),(13,15),(12,14),(14,16),  # 上半身
+    (11,23),(12,24),(23,24),                   # 胴体
+    (23,25),(25,27),(24,26),(26,28),            # 脚
+    (0,11),(0,12),                             # 首
+]
+
+mp_pose = mp.solutions.pose
+
+# ===== OpenGL 初期化 =====
+def init_gl():
+    glEnable(GL_DEPTH_TEST)
+    glMatrixMode(GL_PROJECTION)
+    glLoadIdentity()
+    gluPerspective(45, WINDOW_W / WINDOW_H, 0.1, 50.0)
+    glMatrixMode(GL_MODELVIEW)
+
+# ===== アバター描画 =====
+def draw_avatar(landmarks_list):
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    glLoadIdentity()
+    gluLookAt(0, 0, 3, 0, 0, 0, 0, 1, 0)
+    glClearColor(0.08, 0.08, 0.15, 1.0)  # 背景色（濃紺）
+
+    colors = [
+        (0.3, 0.8, 1.0),   # 水色
+        (1.0, 0.5, 0.3),   # オレンジ
+        (0.4, 1.0, 0.5),   # 緑
+        (1.0, 0.4, 0.8),   # ピンク
+    ]
+
+    for person_idx, lms in enumerate(landmarks_list):
+        r, g, b = colors[person_idx % len(colors)]
+
+        # 骨格ライン
+        glColor3f(r, g, b)
+        glLineWidth(3.0)
+        glBegin(GL_LINES)
+        for s, e in CONNECTIONS:
+            ls, le = lms[s], lms[e]
+            glVertex3f( ls[0] - 0.5, -(ls[1] - 0.5), -ls[2] * 0.5)
+            glVertex3f( le[0] - 0.5, -(le[1] - 0.5), -le[2] * 0.5)
+        glEnd()
+
+        # 関節の球
+        glColor3f(1.0, 1.0, 1.0)
+        for lm in lms:
+            glPushMatrix()
+            glTranslatef(lm[0] - 0.5, -(lm[1] - 0.5), -lm[2] * 0.5)
+            q = gluNewQuadric()
+            gluSphere(q, 0.018, 10, 10)
+            glPopMatrix()
+
+# ===== カメラ映像をOpenGLにオーバーレイ =====
+def draw_camera_feed(frame):
+    small = cv2.resize(frame, (CAM_W, CAM_H))
+    small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+    small = np.flipud(small)
+    small = np.ascontiguousarray(small)
+
+    glMatrixMode(GL_PROJECTION)
+    glPushMatrix()
+    glLoadIdentity()
+    glOrtho(0, WINDOW_W, 0, WINDOW_H, -1, 1)
+    glMatrixMode(GL_MODELVIEW)
+    glPushMatrix()
+    glLoadIdentity()
+
+    glDisable(GL_DEPTH_TEST)
+    glRasterPos2i(10, WINDOW_H - CAM_H - 10)
+    glDrawPixels(CAM_W, CAM_H, GL_RGB, GL_UNSIGNED_BYTE, small)
+    glEnable(GL_DEPTH_TEST)
+
+    glMatrixMode(GL_PROJECTION)
+    glPopMatrix()
+    glMatrixMode(GL_MODELVIEW)
+    glPopMatrix()
+
+# ===== メイン =====
+def main():
+    pygame.init()
+    pygame.display.set_mode((WINDOW_W, WINDOW_H), DOUBLEBUF | OPENGL)
+    pygame.display.set_caption("3D Avatar – Press Q to quit")
+    init_gl()
+
+    cap = cv2.VideoCapture(CAMERA_ID)
+    if not cap.isOpened():
+        print("❌ カメラが見つかりません。CAMERA_ID を変更してください。")
+        return
+
+    with mp_pose.Pose(
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+        model_complexity=1
+    ) as pose:
+
+        print("✅ 起動しました！ Q キーで終了")
+
+        while True:
+            # イベント処理
+            for event in pygame.event.get():
+                if event.type == QUIT:
+                    cap.release()
+                    pygame.quit()
+                    return
+            keys = pygame.key.get_pressed()
+            if keys[K_q]:
+                cap.release()
+                pygame.quit()
+                return
+
+            # カメラ取得
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            frame = cv2.flip(frame, 1)  # 鏡反転
+            rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = pose.process(rgb)
+
+            # ランドマーク抽出
+            landmarks_list = []
+            if results.pose_landmarks:
+                lms = [
+                    (lm.x, lm.y, lm.z)
+                    for lm in results.pose_landmarks.landmark
+                ]
+                landmarks_list.append(lms)
+                print(f"👤 人物検出: {len(landmarks_list)} 人")
+
+            # 描画
+            draw_avatar(landmarks_list)
+            draw_camera_feed(frame)
+            pygame.display.flip()
+            pygame.time.wait(10)
+
+if __name__ == "__main__":
+    main()
